@@ -495,73 +495,112 @@
     return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
   }
 
+  const GOOGLE_VISION_KEY = 'AIzaSyC4IqdYADbiqGubHwWYu-ld6JMaHtsSar0';
+  const WORKER_URL = 'https://mute-recipe-3fcc.samuel-aguilar-aguilo.workers.dev';
+
   async function analyzeFrame() {
     if (analyzing || !stream) return;
     analyzing = true;
 
     const b64 = captureFrame();
 
-    // Show scanning UI
     document.getElementById('scanOverlay').classList.add('active');
     document.getElementById('btnAnalyze').disabled = true;
     document.getElementById('emptyState').style.display = 'none';
 
-    const prompt = `Eres un asistente de organización del hogar con visión artificial. Analiza esta imagen de una mesa/habitación/espacio.
+    try {
+      // PASO 1: Google Vision detecta objetos con coordenadas reales
+      const visionRes = await fetch(
+        `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            requests: [{
+              image: { content: b64 },
+              features: [
+                { type: 'OBJECT_LOCALIZATION', maxResults: 12 },
+                { type: 'LABEL_DETECTION', maxResults: 10 }
+              ]
+            }]
+          })
+        }
+      );
+      const visionData = await visionRes.json();
+      const objects = visionData.responses?.[0]?.localizedObjectAnnotations || [];
+      const labels = visionData.responses?.[0]?.labelAnnotations?.map(l => l.description) || [];
 
-  Responde ÚNICAMENTE en JSON sin markdown ni backticks, con esta estructura exacta:
+      if (objects.length === 0) {
+        throw new Error('No se detectaron objetos en la imagen');
+      }
+
+      // Convertir vértices de Google Vision (0-1) a porcentajes (0-100)
+      const detectedItems = objects.map(obj => {
+        const verts = obj.boundingPoly?.normalizedVertices || [];
+        const xs = verts.map(v => v.x || 0);
+        const ys = verts.map(v => v.y || 0);
+        const minX = Math.min(...xs) * 100;
+        const minY = Math.min(...ys) * 100;
+        const maxX = Math.max(...xs) * 100;
+        const maxY = Math.max(...ys) * 100;
+        return {
+          name: obj.name,
+          score: obj.score,
+          box: { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+        };
+      });
+
+      // PASO 2: Claude categoriza y sugiere via Worker
+      const itemNames = detectedItems.map(i => i.name).join(', ');
+      const prompt = `Eres un asistente de organización del hogar. Se han detectado estos objetos en una imagen de un espacio: ${itemNames}.
+  Etiquetas adicionales del espacio: ${labels.slice(0,5).join(', ')}.
+
+  Responde ÚNICAMENTE en JSON sin markdown ni backticks:
   {
-    "score": <número del 0 al 100 indicando el nivel de orden, donde 0=caos total y 100=perfecto orden>,
-    "verdict": "<frase corta de 4-8 palabras que describa el estado del espacio>",
-    "summary": "<párrafo breve de 2-3 frases con observación general del espacio y consejo motivacional>",
+    "score": <0-100 nivel de orden estimado basado en los objetos detectados>,
+    "verdict": "<frase corta de 4-8 palabras describiendo el estado>",
+    "summary": "<2-3 frases de observación general y consejo motivacional>",
     "items": [
       {
-        "name": "<nombre del objeto>",
+        "name": "<nombre del objeto en español>",
         "category": "<una de: ropa, papeles, comida, electronica, libros, higiene, utensilios, objetos, basura, decoracion>",
-        "suggestion": "<dónde o cómo guardar/organizar este ítem, en 1 frase corta>",
-        "box": {
-          "x": <0-100, porcentaje desde la izquierda donde empieza el objeto>,
-          "y": <0-100, porcentaje desde arriba donde empieza el objeto>,
-          "w": <0-100, anchura del objeto como porcentaje del ancho total de la imagen>,
-          "h": <0-100, altura del objeto como porcentaje del alto total de la imagen>
-        }
+        "suggestion": "<dónde o cómo guardar este ítem, 1 frase práctica y amable>"
       }
     ]
   }
 
-  Detecta todos los objetos visibles (mínimo 3, máximo 12). Sé MUY preciso con las coordenadas box, deben indicar exactamente dónde está cada objeto en la imagen. Sé específico con los nombres. Las sugerencias deben ser prácticas y amables.`;
+  Devuelve un item por cada objeto detectado en el mismo orden. Traduce los nombres al español.`;
 
-    try {
-      const response = await fetch('https://mute-recipe-3fcc.samuel-aguilar-aguilo.workers.dev', {
+      const claudeRes = await fetch(WORKER_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: b64 } },
-              { type: 'text', text: prompt }
-            ]
-          }]
+          messages: [{ role: 'user', content: prompt }]
         })
       });
 
-      const data = await response.json();
-      const text = data.content?.find(c => c.type === 'text')?.text || '';
-
+      const claudeData = await claudeRes.json();
+      const text = claudeData.content?.find(c => c.type === 'text')?.text || '';
       let result;
       try {
         result = JSON.parse(text.replace(/```json|```/g, '').trim());
       } catch {
-        throw new Error('No se pudo parsear la respuesta');
+        throw new Error('No se pudo parsear la respuesta de Claude');
       }
+
+      // Combinar coordenadas reales de Vision con categorías de Claude
+      result.items = result.items.map((item, i) => ({
+        ...item,
+        box: detectedItems[i]?.box || null
+      }));
 
       renderResults(result, b64);
       saveHistory(b64, result.score);
 
     } catch(err) {
-      showToast('Error al analizar. Intenta de nuevo.');
+      showToast('Error: ' + err.message);
       console.error(err);
     } finally {
       document.getElementById('scanOverlay').classList.remove('active');
