@@ -525,7 +525,7 @@ Responde ÚNICAMENTE en JSON sin markdown ni backticks, con esta estructura exac
 Detecta todos los objetos visibles (mínimo 3, máximo 12). Sé específico con los nombres. Las sugerencias deben ser prácticas y amables.`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch('https://mute-recipe-3fcc.samuel-aguilar-aguilo.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
